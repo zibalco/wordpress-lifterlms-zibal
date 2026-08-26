@@ -14,10 +14,9 @@ class LLMS_Payment_Gateway_zibal extends LLMS_Payment_Gateway {
 	const REDIRECT_URL = 'https://gateway.zibal.ir/start/';
 	const REQUEST_URL  = 'https://gateway.zibal.ir/v1/request';
 	const VERIFY_URL   = 'https://gateway.zibal.ir/v1/verify';
-	const VERSION          = '2.3.2';
-	const HTTP_TIMEOUT     = 20;
-	const LOCK_TTL         = 60;
-	const REQUEST_LOCK_TTL = 120;
+	const VERSION      = '2.3.2';
+	const HTTP_TIMEOUT = 20;
+	const LOCK_TTL     = 60;
 
 	const META_TRACK_ID             = '_llms_zibal_track_id';
 	const META_REQUESTED_AMOUNT     = '_llms_zibal_requested_amount';
@@ -221,22 +220,8 @@ class LLMS_Payment_Gateway_zibal extends LLMS_Payment_Gateway {
 			return '';
 		}
 
-		$order_id        = $this->get_order_id( $order );
-		$redirect_status = $this->request_value( 'llms_zibal_status' );
-		if ( 'order-status-blocked' === $redirect_status ) {
-			return $this->render_transient_failure_result(
-				__( 'سفارش قابل تکمیل خودکار نیست', 'lifterlms-zibal' ),
-				__( 'وضعیت این سفارش بعد از پرداخت تغییر کرده است. لطفاً برای بررسی با پشتیبانی تماس بگیرید.', 'lifterlms-zibal' )
-			);
-		}
-		if ( 'callback-rejected' === $redirect_status ) {
-			return $this->render_transient_failure_result(
-				__( 'اطلاعات بازگشت پرداخت معتبر نیست', 'lifterlms-zibal' ),
-				__( 'برای اطمینان از نتیجه پرداخت، لطفاً با پشتیبانی تماس بگیرید.', 'lifterlms-zibal' )
-			);
-		}
-
-		$status = (string) get_post_meta( $order_id, self::META_RESULT_STATUS, true );
+		$order_id = $this->get_order_id( $order );
+		$status   = (string) get_post_meta( $order_id, self::META_RESULT_STATUS, true );
 		if ( 'success' === $status ) {
 			return $this->render_success_result( $order_id );
 		}
@@ -299,7 +284,7 @@ class LLMS_Payment_Gateway_zibal extends LLMS_Payment_Gateway {
 		$order_id = $this->get_order_id( $order );
 		$track_id = $this->get_callback_track_id();
 		if ( ! $order_id || ! $track_id ) {
-			$this->reject_unbound_callback( $order, __( 'Missing or invalid Zibal callback data.', 'lifterlms-zibal' ) );
+			$this->fail_payment( $order, __( 'Missing or invalid Zibal callback data.', 'lifterlms-zibal' ) );
 		}
 
 		$stored_track_id = (string) get_post_meta( $order_id, self::META_TRACK_ID, true );
@@ -308,7 +293,7 @@ class LLMS_Payment_Gateway_zibal extends LLMS_Payment_Gateway {
 		$stored_txn_id   = (string) get_post_meta( $order_id, self::META_TRANSACTION_ID, true );
 
 		if ( ! $stored_track_id || ! hash_equals( $stored_track_id, $track_id ) ) {
-			$this->reject_unbound_callback( $order, __( 'Zibal track ID does not match the pending order.', 'lifterlms-zibal' ) );
+			$this->fail_payment( $order, __( 'Zibal track ID does not match the pending order.', 'lifterlms-zibal' ) );
 		}
 
 		$order_key       = (string) $order->get( 'order_key' );
@@ -326,34 +311,17 @@ class LLMS_Payment_Gateway_zibal extends LLMS_Payment_Gateway {
 			! $stored_token_hash ||
 			! hash_equals( $stored_token_hash, $this->binding_hash( $callback_token ) )
 		) {
-			$this->reject_unbound_callback( $order, __( 'Zibal callback is not bound to this order.', 'lifterlms-zibal' ) );
+			$this->fail_payment( $order, __( 'Zibal callback is not bound to this order.', 'lifterlms-zibal' ) );
 		}
 
 		if ( 'paid' === $payment_state && $stored_txn_id ) {
-			if ( 'completed' === $this->get_order_status_slug( $order, true ) ) {
-				$this->complete_transaction( $order );
-				return;
+			if ( ! $this->ensure_order_completed( $order ) ) {
+				$this->move_to_manual_review( $order, __( 'The verified Zibal order could not be changed to completed status.', 'lifterlms-zibal' ) );
 			}
-
-			$this->stop_callback_for_closed_order(
-				$order,
-				__( 'A paid Zibal callback was ignored because the LifterLMS order is no longer completed.', 'lifterlms-zibal' )
-			);
+			$this->complete_transaction( $order );
 		}
 		if ( 'requested' !== $payment_state ) {
-			$this->move_to_manual_review(
-				$order,
-				__( 'Zibal callback received for an order that is not in the requested payment state.', 'lifterlms-zibal' ),
-				! $this->order_accepts_payment_completion( $order, true )
-			);
-		}
-
-		if ( ! $this->order_accepts_payment_completion( $order, true ) ) {
-			$this->move_to_manual_review(
-				$order,
-				__( 'Zibal callback was not allowed to complete an order that is no longer pending.', 'lifterlms-zibal' ),
-				true
-			);
+			$this->move_to_manual_review( $order, __( 'Zibal callback received for an order that is not in the requested payment state.', 'lifterlms-zibal' ) );
 		}
 
 		$merchant        = $this->get_merchant_id();
@@ -387,7 +355,7 @@ class LLMS_Payment_Gateway_zibal extends LLMS_Payment_Gateway {
 		if ( is_wp_error( $response ) ) {
 			$this->release_verification_lock( $lock_name );
 			$this->log( 'Zibal verify transport error: ' . $response->get_error_code() );
-			$this->fail_payment( $order, $this->build_transport_error_note( __( 'تأیید پرداخت', 'lifterlms-zibal' ), $response ) );
+			$this->fail_payment( $order, __( 'Zibal verification service was unavailable.', 'lifterlms-zibal' ) );
 		}
 
 		$result_code = isset( $response['result'] ) && is_numeric( $response['result'] ) ? (int) $response['result'] : 0;
@@ -398,13 +366,10 @@ class LLMS_Payment_Gateway_zibal extends LLMS_Payment_Gateway {
 				$order_id,
 				'failed',
 				$result_code,
-				__( 'تأیید پرداخت زیبال ناموفق بود. در صورت کسر وجه با پشتیبانی تماس بگیرید.', 'lifterlms-zibal' )
+				$this->get_provider_message( $response )
 			);
 			if ( 201 === $result_code ) {
 				$this->move_to_manual_review( $order, $failure_note );
-			}
-			if ( in_array( $result_code, array( 202, 203 ), true ) ) {
-				update_post_meta( $order_id, self::META_PAYMENT_STATE, 'failed' );
 			}
 
 			$this->fail_payment( $order, $failure_note );
@@ -426,15 +391,6 @@ class LLMS_Payment_Gateway_zibal extends LLMS_Payment_Gateway {
 			$this->move_to_manual_review( $order, __( 'Zibal verification data did not match the local order.', 'lifterlms-zibal' ) );
 		}
 
-		if ( ! $this->order_accepts_payment_completion( $order, true ) ) {
-			$this->release_verification_lock( $lock_name );
-			$this->move_to_manual_review(
-				$order,
-				__( 'Zibal verified the payment, but the LifterLMS order stopped being pending before the transaction was recorded.', 'lifterlms-zibal' ),
-				true
-			);
-		}
-
 		$reference_id  = isset( $response['refNumber'] ) && is_scalar( $response['refNumber'] ) ? $this->validate_track_id( $response['refNumber'] ) : '';
 		$transaction_id = $reference_id ?: $stored_track_id;
 		$paid_at        = $this->sanitize_paid_at( isset( $response['paidAt'] ) ? $response['paidAt'] : '' );
@@ -450,14 +406,6 @@ class LLMS_Payment_Gateway_zibal extends LLMS_Payment_Gateway {
 		if ( '-' !== $paid_at ) {
 			$transaction_data['completed_date'] = $paid_at;
 		}
-		if ( ! $this->order_accepts_payment_completion( $order, true ) ) {
-			$this->release_verification_lock( $lock_name );
-			$this->move_to_manual_review(
-				$order,
-				__( 'Zibal verified the payment, but the LifterLMS order changed before transaction recording started.', 'lifterlms-zibal' ),
-				true
-			);
-		}
 		$recording_meta = array(
 			self::META_TRANSACTION_ID => $transaction_id,
 			self::META_PAYMENT_STATE  => 'recording',
@@ -468,14 +416,6 @@ class LLMS_Payment_Gateway_zibal extends LLMS_Payment_Gateway {
 				$this->release_verification_lock( $lock_name );
 				$this->move_to_manual_review( $order, __( 'Zibal was verified, but the transaction recording state could not be persisted.', 'lifterlms-zibal' ) );
 			}
-		}
-		if ( ! $this->order_accepts_payment_completion( $order, true ) ) {
-			$this->release_verification_lock( $lock_name );
-			$this->move_to_manual_review(
-				$order,
-				__( 'Zibal verified the payment, but the LifterLMS order changed immediately before transaction recording.', 'lifterlms-zibal' ),
-				true
-			);
 		}
 
 		$transaction = $order->record_transaction( $transaction_data );
@@ -534,50 +474,6 @@ class LLMS_Payment_Gateway_zibal extends LLMS_Payment_Gateway {
 		if ( ! $order_id || ! $order_key ) {
 			return llms_add_notice( esc_html__( 'اطلاعات سفارش معتبر نیست.', 'lifterlms-zibal' ), 'error' );
 		}
-		if ( ! $this->order_accepts_payment_completion( $order, true ) ) {
-			return llms_add_notice( esc_html__( 'این سفارش دیگر در وضعیت انتظار پرداخت نیست. لطفاً با پشتیبانی تماس بگیرید.', 'lifterlms-zibal' ), 'error' );
-		}
-
-		$request_lock = $this->acquire_request_lock( $order_id );
-		if ( ! $request_lock ) {
-			return llms_add_notice( esc_html__( 'درخواست پرداخت دیگری برای این سفارش در حال پردازش است. لطفاً چند لحظه بعد دوباره تلاش کنید.', 'lifterlms-zibal' ), 'error' );
-		}
-
-		$payment_state = (string) get_post_meta( $order_id, self::META_PAYMENT_STATE, true );
-		if ( 'requested' === $payment_state ) {
-			$stored_track_id = $this->validate_track_id( get_post_meta( $order_id, self::META_TRACK_ID, true ) );
-			$is_same_attempt = $stored_track_id
-				&& hash_equals( (string) $amount, (string) get_post_meta( $order_id, self::META_REQUESTED_AMOUNT, true ) )
-				&& hash_equals( $this->binding_hash( $order_key ), (string) get_post_meta( $order_id, self::META_ORDER_BINDING, true ) )
-				&& hash_equals( $this->merchant_fingerprint( $merchant ), (string) get_post_meta( $order_id, self::META_MERCHANT_FINGERPRINT, true ) )
-				&& (string) get_post_meta( $order_id, self::META_CALLBACK_TOKEN_HASH, true )
-				&& hash_equals( $stored_track_id, (string) get_post_meta( $order_id, self::META_TRANSACTION_ID, true ) );
-
-			$this->release_request_lock( $request_lock );
-			if ( $is_same_attempt ) {
-				$this->log( 'Reusing active Zibal payment request.', $order_id, $stored_track_id );
-				$this->redirect_to_zibal( $stored_track_id );
-			}
-
-			$this->log( 'Active Zibal payment request metadata did not match the order.', $order_id );
-			return llms_add_notice( esc_html__( 'اطلاعات پرداخت قبلی این سفارش نیازمند بررسی است. لطفاً با پشتیبانی تماس بگیرید.', 'lifterlms-zibal' ), 'error' );
-		}
-
-		if ( 'paid' === $payment_state ) {
-			$stored_txn_id = (string) get_post_meta( $order_id, self::META_TRANSACTION_ID, true );
-			$this->release_request_lock( $request_lock );
-			if ( $stored_txn_id && 'completed' === $this->get_order_status_slug( $order, true ) ) {
-				wp_safe_redirect( $this->get_result_redirect_url( $order, 'success' ) );
-				exit;
-			}
-
-			return llms_add_notice( esc_html__( 'وضعیت این پرداخت باید توسط پشتیبانی بررسی شود.', 'lifterlms-zibal' ), 'error' );
-		}
-
-		if ( ! in_array( $payment_state, array( '', 'failed' ), true ) ) {
-			$this->release_request_lock( $request_lock );
-			return llms_add_notice( esc_html__( 'یک پرداخت قبلی برای این سفارش در حال بررسی است. لطفاً پرداخت تازه‌ای ایجاد نکنید و با پشتیبانی تماس بگیرید.', 'lifterlms-zibal' ), 'error' );
-		}
 
 		$callback_token = wp_generate_password( 32, false, false );
 		$callback_url   = add_query_arg(
@@ -598,8 +494,6 @@ class LLMS_Payment_Gateway_zibal extends LLMS_Payment_Gateway {
 		);
 
 		if ( is_wp_error( $response ) ) {
-			$order->add_note( $this->build_transport_error_note( __( 'ایجاد درخواست پرداخت', 'lifterlms-zibal' ), $response ) );
-			$this->release_request_lock( $request_lock );
 			$this->log( 'Zibal request transport error: ' . $response->get_error_code() );
 			return llms_add_notice( esc_html__( 'در حال حاضر ارتباط با درگاه زیبال ممکن نیست. لطفاً دوباره تلاش کنید.', 'lifterlms-zibal' ), 'error' );
 		}
@@ -612,7 +506,6 @@ class LLMS_Payment_Gateway_zibal extends LLMS_Payment_Gateway {
 			} else {
 				$order->add_note( __( 'پاسخ موفق زیبال فاقد شناسه پیگیری معتبر بود.', 'lifterlms-zibal' ) );
 			}
-			$this->release_request_lock( $request_lock );
 			$this->log( 'Zibal request rejected.', $result_code );
 			return llms_add_notice( esc_html__( 'درخواست پرداخت توسط زیبال پذیرفته نشد. لطفاً دوباره تلاش کنید.', 'lifterlms-zibal' ), 'error' );
 		}
@@ -623,30 +516,33 @@ class LLMS_Payment_Gateway_zibal extends LLMS_Payment_Gateway {
 			self::META_CALLBACK_TOKEN_HASH  => $this->binding_hash( $callback_token ),
 			self::META_MERCHANT_FINGERPRINT => $this->merchant_fingerprint( $merchant ),
 			self::META_TRACK_ID             => $track_id,
+			self::META_PAYMENT_STATE        => 'requested',
 			self::META_TRANSACTION_ID       => $track_id,
 			self::META_RESULT_STATUS        => 'pending',
 			self::META_RESULT_CODE          => '',
 			self::META_RESULT_MESSAGE       => '',
 			self::META_PAID_AT              => '',
 			self::META_CARD_NUMBER          => '',
-			self::META_PAYMENT_STATE        => 'requested',
 		);
 		foreach ( $payment_meta as $meta_key => $meta_value ) {
 			update_post_meta( $order_id, $meta_key, $meta_value );
 			if ( ! hash_equals( $meta_value, (string) get_post_meta( $order_id, $meta_key, true ) ) ) {
-				update_post_meta( $order_id, self::META_PAYMENT_STATE, 'manual-review' );
-				$order->add_note( sprintf( __( 'درخواست پرداخت در زیبال ساخته شد، اما ثبت کامل اطلاعات آن در سفارش ناموفق بود. شناسه پیگیری: %s', 'lifterlms-zibal' ), $track_id ) );
-				$this->release_request_lock( $request_lock );
 				$this->log( 'Could not persist Zibal payment metadata.', $order_id, $meta_key );
-				return llms_add_notice( esc_html__( 'ثبت اطلاعات پرداخت کامل نشد. پرداخت را تکرار نکنید و با پشتیبانی تماس بگیرید.', 'lifterlms-zibal' ), 'error' );
+				return llms_add_notice( esc_html__( 'ثبت اطلاعات پرداخت ممکن نشد. لطفاً دوباره تلاش کنید.', 'lifterlms-zibal' ), 'error' );
 			}
 		}
 
-		$this->release_request_lock( $request_lock );
 		$order->add_note( sprintf( 'Zibal transaction requested. Track ID: %s', $track_id ) );
 		do_action( 'lifterlms_handle_pending_order_complete', $order );
 		$this->log( 'Zibal payment requested.', $order_id, $track_id );
-		$this->redirect_to_zibal( $track_id );
+
+		$redirect_url = self::REDIRECT_URL . rawurlencode( $track_id );
+		if ( function_exists( 'llms_redirect_and_exit' ) ) {
+			llms_redirect_and_exit( $redirect_url, array( 'safe' => false ) );
+		}
+
+		wp_redirect( $redirect_url ); // phpcs:ignore WordPress.Security.SafeRedirect.wp_redirect_wp_redirect -- Trusted Zibal URL and validated numeric track ID.
+		exit;
 	}
 
 	/**
@@ -969,25 +865,6 @@ class LLMS_Payment_Gateway_zibal extends LLMS_Payment_Gateway {
 	}
 
 	/**
-	 * Build an admin-only note for a Zibal transport or response parsing error.
-	 *
-	 * @param string   $stage Payment stage.
-	 * @param WP_Error $error WordPress HTTP error.
-	 * @return string
-	 */
-	private function build_transport_error_note( $stage, $error ) {
-		$error_code = is_wp_error( $error ) ? sanitize_text_field( (string) $error->get_error_code() ) : 'unknown';
-		$message    = is_wp_error( $error ) ? sanitize_textarea_field( (string) $error->get_error_message() ) : '';
-
-		return sprintf(
-			__( "ارتباط با زیبال ناموفق بود.\nمرحله: %1\$s\nکد خطای ارتباط: %2\$s\nجزئیات خطا: %3\$s", 'lifterlms-zibal' ),
-			sanitize_text_field( $stage ),
-			$error_code ?: '-',
-			$message ?: '-'
-		);
-	}
-
-	/**
 	 * Build the structured admin note for a successful payment.
 	 *
 	 * The provider success message is deliberately excluded.
@@ -1017,52 +894,17 @@ class LLMS_Payment_Gateway_zibal extends LLMS_Payment_Gateway {
 	 * @return bool
 	 */
 	private function ensure_order_completed( $order ) {
-		$status = $this->get_order_status_slug( $order, true );
-		if ( 'completed' === $status ) {
+		$status = (string) $order->get( 'status' );
+		if ( in_array( $status, array( 'completed', 'llms-completed' ), true ) ) {
 			return true;
 		}
 
-		if ( 'pending' !== $status || ! method_exists( $order, 'set_status' ) ) {
+		if ( ! method_exists( $order, 'set_status' ) ) {
 			return false;
 		}
 
 		$order->set_status( 'completed' );
-		return 'completed' === $this->get_order_status_slug( $order, true );
-	}
-
-	/**
-	 * Get a normalized LifterLMS order status without its optional llms- prefix.
-	 *
-	 * @param LLMS_Order $order Order object.
-	 * @param bool       $fresh Clear WordPress' local post cache before reading.
-	 * @return string
-	 */
-	private function get_order_status_slug( $order, $fresh = false ) {
-		$order_id = $this->get_order_id( $order );
-		if ( $fresh && $order_id && function_exists( 'clean_post_cache' ) ) {
-			clean_post_cache( $order_id );
-		}
-		$status = $order_id && function_exists( 'get_post_status' ) ? get_post_status( $order_id ) : '';
-		if ( ! $status ) {
-			$status = $order->get( 'status' );
-		}
-		$status = sanitize_key( (string) $status );
-		if ( 0 === strpos( $status, 'llms-' ) ) {
-			$status = substr( $status, 5 );
-		}
-
-		return $status;
-	}
-
-	/**
-	 * Only a pending native LifterLMS order may be completed by a callback.
-	 *
-	 * @param LLMS_Order $order Order object.
-	 * @param bool       $fresh Clear WordPress' local post cache before reading.
-	 * @return bool
-	 */
-	private function order_accepts_payment_completion( $order, $fresh = false ) {
-		return 'pending' === $this->get_order_status_slug( $order, $fresh );
+		return in_array( (string) $order->get( 'status' ), array( 'completed', 'llms-completed' ), true );
 	}
 
 	/**
@@ -1105,7 +947,7 @@ class LLMS_Payment_Gateway_zibal extends LLMS_Payment_Gateway {
 	 * @param int    $order_id   Order ID.
 	 * @param string $status     Result status.
 	 * @param int    $result_code Zibal result code.
-	 * @param string $message    Customer-safe result message.
+	 * @param string $message    Exact plain-text provider message on failure.
 	 * @param string $paid_at    Provider payment time on success.
 	 * @param string $card_number Masked card number on success.
 	 */
@@ -1150,7 +992,8 @@ class LLMS_Payment_Gateway_zibal extends LLMS_Payment_Gateway {
 	 * @return string
 	 */
 	private function render_failure_result( $order_id, $status ) {
-		$message   = (string) get_post_meta( $order_id, self::META_RESULT_MESSAGE, true );
+		$result_code = (string) get_post_meta( $order_id, self::META_RESULT_CODE, true );
+		$message     = (string) get_post_meta( $order_id, self::META_RESULT_MESSAGE, true );
 		$is_manual   = 'manual-review' === $status;
 		$title       = $is_manual ? __( 'پرداخت نیازمند بررسی است', 'lifterlms-zibal' ) : __( 'پرداخت ناموفق بود', 'lifterlms-zibal' );
 		$label       = $is_manual ? __( 'نیازمند بررسی', 'lifterlms-zibal' ) : __( 'ناموفق', 'lifterlms-zibal' );
@@ -1161,27 +1004,13 @@ class LLMS_Payment_Gateway_zibal extends LLMS_Payment_Gateway {
 		}
 
 		return sprintf(
-			'<section class="llms-zibal-payment-result llms-zibal-payment-result--failed" dir="rtl" role="alert"><h2>%1$s</h2><dl><div><dt>%2$s</dt><dd>%3$s</dd></div><div><dt>%4$s</dt><dd>%5$s</dd></div></dl></section>',
+			'<section class="llms-zibal-payment-result llms-zibal-payment-result--failed" dir="rtl" role="alert"><h2>%1$s</h2><dl><div><dt>%2$s</dt><dd>%3$s</dd></div>%4$s<div><dt>%5$s</dt><dd>%6$s</dd></div></dl></section>',
 			esc_html( $title ),
 			esc_html__( 'وضعیت سفارش', 'lifterlms-zibal' ),
 			esc_html( $label ),
-			esc_html__( 'پیام', 'lifterlms-zibal' ),
+			$result_code ? '<div><dt>' . esc_html__( 'کد پاسخ زیبال', 'lifterlms-zibal' ) . '</dt><dd>' . esc_html( $result_code ) . '</dd></div>' : '',
+			esc_html__( 'پاسخ زیبال', 'lifterlms-zibal' ),
 			nl2br( esc_html( $message ) )
-		);
-	}
-
-	/**
-	 * Render a customer-safe result that must not be persisted on the order.
-	 *
-	 * @param string $title   Result title.
-	 * @param string $message Customer message.
-	 * @return string
-	 */
-	private function render_transient_failure_result( $title, $message ) {
-		return sprintf(
-			'<section class="llms-zibal-payment-result llms-zibal-payment-result--failed" dir="rtl" role="alert"><h2>%1$s</h2><p>%2$s</p></section>',
-			esc_html( $title ),
-			esc_html( $message )
 		);
 	}
 
@@ -1231,127 +1060,6 @@ class LLMS_Payment_Gateway_zibal extends LLMS_Payment_Gateway {
 	}
 
 	/**
-	 * Redirect to a validated Zibal tracking URL and stop execution.
-	 *
-	 * @param string $track_id Validated Zibal track ID.
-	 * @return void
-	 */
-	private function redirect_to_zibal( $track_id ) {
-		$redirect_url = self::REDIRECT_URL . rawurlencode( $track_id );
-		if ( function_exists( 'llms_redirect_and_exit' ) ) {
-			llms_redirect_and_exit( $redirect_url, array( 'safe' => false ) );
-		}
-
-		wp_redirect( $redirect_url ); // phpcs:ignore WordPress.Security.SafeRedirect.wp_redirect_wp_redirect -- Trusted Zibal URL and validated numeric track ID.
-		exit;
-	}
-
-	/**
-	 * Acquire an owner-bound lock before creating or reusing a payment request.
-	 *
-	 * Both the initial insert and an expired-lock takeover use database-level
-	 * compare-and-swap operations so WordPress' option cache cannot create a
-	 * second owner.
-	 *
-	 * @param int $order_id Order ID.
-	 * @return array|false Lock identity or false when another request owns it.
-	 */
-	private function acquire_request_lock( $order_id ) {
-		global $wpdb;
-
-		if ( ! isset( $wpdb->options ) ) {
-			return false;
-		}
-
-		$lock_name  = 'llms_zibal_request_lock_' . absint( $order_id );
-		$lock_value = wp_generate_uuid4() . '|' . ( time() + self::REQUEST_LOCK_TTL );
-		$inserted   = $wpdb->query( // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery -- INSERT IGNORE provides a true insert-only lock claim.
-			$wpdb->prepare(
-				"INSERT IGNORE INTO `{$wpdb->options}` (`option_name`, `option_value`, `autoload`) VALUES (%s, %s, %s)",
-				$lock_name,
-				$lock_value,
-				'no'
-			)
-		);
-		if ( 1 === $inserted ) {
-			$this->clear_request_lock_cache( $lock_name );
-			return array(
-				'name'  => $lock_name,
-				'value' => $lock_value,
-			);
-		}
-
-		$existing = $wpdb->get_var( // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery -- Lock reads must bypass the non-atomic Options API cache.
-			$wpdb->prepare(
-				"SELECT `option_value` FROM `{$wpdb->options}` WHERE `option_name` = %s LIMIT 1",
-				$lock_name
-			)
-		);
-		$existing = is_scalar( $existing ) ? (string) $existing : '';
-		$parts    = explode( '|', $existing, 2 );
-		$expires  = isset( $parts[1] ) ? (int) $parts[1] : 0;
-		if ( ! $existing || ( $expires && time() <= $expires ) ) {
-			return false;
-		}
-
-		$updated = $wpdb->query( // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery -- Atomic compare-and-swap is required for the lock owner.
-			$wpdb->prepare(
-				"UPDATE `{$wpdb->options}` SET `option_value` = %s WHERE `option_name` = %s AND `option_value` = %s",
-				$lock_value,
-				$lock_name,
-				$existing
-			)
-		);
-		if ( 1 !== $updated ) {
-			return false;
-		}
-
-		$this->clear_request_lock_cache( $lock_name );
-		return array(
-			'name'  => $lock_name,
-			'value' => $lock_value,
-		);
-	}
-
-	/**
-	 * Release a request lock only when its owner value still matches.
-	 *
-	 * @param array $lock Lock identity returned by acquire_request_lock().
-	 * @return void
-	 */
-	private function release_request_lock( $lock ) {
-		global $wpdb;
-
-		if ( ! is_array( $lock ) || empty( $lock['name'] ) || empty( $lock['value'] ) || ! isset( $wpdb->options ) ) {
-			return;
-		}
-
-		$wpdb->query( // phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery -- Owner-bound delete prevents releasing a replacement lock.
-			$wpdb->prepare(
-				"DELETE FROM `{$wpdb->options}` WHERE `option_name` = %s AND `option_value` = %s",
-				$lock['name'],
-				$lock['value']
-			)
-		);
-		$this->clear_request_lock_cache( $lock['name'] );
-	}
-
-	/**
-	 * Remove local option-cache entries after a direct request-lock query.
-	 *
-	 * @param string $lock_name Lock option name.
-	 * @return void
-	 */
-	private function clear_request_lock_cache( $lock_name ) {
-		wp_cache_delete( $lock_name, 'options' );
-		$notoptions = wp_cache_get( 'notoptions', 'options' );
-		if ( is_array( $notoptions ) && isset( $notoptions[ $lock_name ] ) ) {
-			unset( $notoptions[ $lock_name ] );
-			wp_cache_set( 'notoptions', $notoptions, 'options' );
-		}
-	}
-
-	/**
 	 * Acquire an atomic, short-lived verification lock.
 	 *
 	 * @param int $order_id Order ID.
@@ -1387,49 +1095,12 @@ class LLMS_Payment_Gateway_zibal extends LLMS_Payment_Gateway {
 	}
 
 	/**
-	 * Reject callback data that has not authenticated against the stored attempt.
-	 *
-	 * Untrusted callback fields must never change payment metadata or add order
-	 * notes because an attacker can repeat them without proving a payment attempt.
-	 *
-	 * @param LLMS_Order $order  Order.
-	 * @param string     $detail Internal log detail.
-	 * @return void
-	 */
-	private function reject_unbound_callback( $order, $detail ) {
-		$order_id = $this->get_order_id( $order );
-		$this->log( 'Rejected unauthenticated Zibal callback.', $order_id, sanitize_text_field( $detail ) );
-		llms_add_notice( esc_html__( 'اطلاعات بازگشت از درگاه معتبر نیست. لطفاً با پشتیبانی تماس بگیرید.', 'lifterlms-zibal' ), 'error' );
-		wp_safe_redirect( $this->get_result_redirect_url( $order, 'callback-rejected' ) );
-		exit;
-	}
-
-	/**
-	 * Stop a paid callback for a native order that was later closed or refunded.
-	 *
-	 * Historical payment metadata is left untouched while the native order status
-	 * remains authoritative.
-	 *
-	 * @param LLMS_Order $order  Order.
-	 * @param string     $detail Admin-only log detail.
-	 * @return void
-	 */
-	private function stop_callback_for_closed_order( $order, $detail ) {
-		$order_id = $this->get_order_id( $order );
-		$this->log( 'Zibal callback ignored for a closed native order.', $order_id, sanitize_text_field( $detail ) );
-		llms_add_notice( esc_html__( 'این سفارش دیگر قابل تکمیل خودکار نیست. لطفاً با پشتیبانی تماس بگیرید.', 'lifterlms-zibal' ), 'error' );
-		wp_safe_redirect( $this->get_result_redirect_url( $order, 'order-status-blocked' ) );
-		exit;
-	}
-
-	/**
 	 * Send an order to manual review and stop the checkout flow.
 	 *
-	 * @param LLMS_Order $order                 Order.
-	 * @param string     $detail                Admin-only detail.
-	 * @param bool       $preserve_order_status Never replace an existing native status.
+	 * @param LLMS_Order $order  Order.
+	 * @param string     $detail Admin-only detail.
 	 */
-	private function move_to_manual_review( $order, $detail, $preserve_order_status = false ) {
+	private function move_to_manual_review( $order, $detail ) {
 		$order_id = $this->get_order_id( $order );
 		update_post_meta( $order_id, self::META_PAYMENT_STATE, 'manual-review' );
 		if ( get_post_meta( $order_id, self::META_RESULT_MESSAGE, true ) ) {
@@ -1443,7 +1114,7 @@ class LLMS_Payment_Gateway_zibal extends LLMS_Payment_Gateway {
 			);
 		}
 		$order->add_note( sanitize_textarea_field( $detail ) );
-		if ( ! $preserve_order_status && $this->order_accepts_payment_completion( $order, true ) && method_exists( $order, 'set_status' ) ) {
+		if ( method_exists( $order, 'set_status' ) ) {
 			$order->set_status( 'on-hold' );
 		}
 		$this->log( 'Zibal order moved to manual review.', $order_id );
