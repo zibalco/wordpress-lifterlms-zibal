@@ -3,7 +3,7 @@
  * Plugin Name: افزونه پرداخت زیبال برای LifterLMS
  * Plugin URI:  https://github.com/zibalco/wordpress-lifterlms-zibal
  * Description: پرداخت دوره‌ها و عضویت‌های LifterLMS از طریق درگاه زیبال.
- * Version:     2.3.2
+ * Version:     2.4.0
  * Author:      Zibal
  * Text Domain: lifterlms-zibal
  * Domain Path: /languages
@@ -26,7 +26,8 @@ if ( ! class_exists( 'LifterLMS_zibal' ) ) {
 	 */
 	final class LifterLMS_zibal {
 
-		const VERSION = '2.3.2';
+		const VERSION = '2.4.0';
+		const MIN_LLMS_VERSION = '6.0.0';
 
 		/**
 		 * Plugin version retained as a public property for backwards compatibility.
@@ -83,7 +84,7 @@ if ( ! class_exists( 'LifterLMS_zibal' ) ) {
 			load_plugin_textdomain( 'lifterlms-zibal', false, dirname( plugin_basename( __FILE__ ) ) . '/languages' );
 
 			$lifterlms = function_exists( 'llms' ) ? llms() : ( function_exists( 'LLMS' ) ? LLMS() : false );
-			if ( ! $lifterlms || ! isset( $lifterlms->version ) || version_compare( $lifterlms->version, '3.0.0-alpha', '<' ) ) {
+			if ( ! $lifterlms || ! isset( $lifterlms->version ) || version_compare( $lifterlms->version, self::MIN_LLMS_VERSION, '<' ) ) {
 				add_action( 'admin_notices', array( $this, 'dependency_notice' ) );
 				return;
 			}
@@ -102,7 +103,7 @@ if ( ! class_exists( 'LifterLMS_zibal' ) ) {
 
 			printf(
 				'<div class="notice notice-error"><p>%s</p></div>',
-				esc_html__( 'درگاه زیبال برای اجرا به LifterLMS نسخه 3.0.0 یا جدیدتر نیاز دارد.', 'lifterlms-zibal' )
+				esc_html__( 'درگاه زیبال برای اجرا به LifterLMS نسخه 6.0.0 یا جدیدتر نیاز دارد.', 'lifterlms-zibal' )
 			);
 		}
 
