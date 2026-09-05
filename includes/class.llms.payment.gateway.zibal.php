@@ -1814,6 +1814,7 @@ class LLMS_Payment_Gateway_zibal extends LLMS_Payment_Gateway {
 		}
 
 		$redirect_url = self::REDIRECT_URL . rawurlencode( $track_id );
+		header( 'Referrer-Policy: origin' );
 		if ( function_exists( 'llms_redirect_and_exit' ) ) {
 			llms_redirect_and_exit( $redirect_url, array( 'safe' => false ) );
 		}
